@@ -1,14 +1,26 @@
 TOOL_DIR := $(shell dirname $(realpath $(firstword $(MAKEFILE_LIST))))
+REPO_URL := https://github.com/dalpan/nexa
 
-.PHONY: install update uninstall dev test lint
+.PHONY: install update upgrade uninstall dev test smoke
 
 # Install nexa globally (available as 'nexa' anywhere in terminal)
 install:
 	pipx install $(TOOL_DIR) --force
 
-# Update after code changes (run this after git pull or edits)
+# Update from local folder (for development / after manual edits)
 update:
 	pipx install $(TOOL_DIR) --force
+	@echo ""
+	@nexa version
+
+# Pull latest from GitHub then reinstall
+upgrade:
+	@echo "Pulling latest from $(REPO_URL)..."
+	git -C $(TOOL_DIR) pull origin main
+	@echo "Reinstalling..."
+	pipx install $(TOOL_DIR) --force
+	@echo ""
+	@nexa version
 
 # Remove global install
 uninstall:

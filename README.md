@@ -51,10 +51,12 @@ make install
 ### Update
 
 ```bash
-make update
-```
+# Pull latest from GitHub and reinstall — works from anywhere
+nexa upgrade
 
-Output will show the installed version, e.g. `installed package nexa 1.1.0`.
+# Or via Makefile (must be inside the repo folder)
+make upgrade
+```
 
 ---
 

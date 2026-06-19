@@ -493,6 +493,39 @@ def version() -> None:
     out_console.print(f"nexa v{__version__}")
 
 
+@app.command()
+def upgrade() -> None:
+    """Pull latest version from GitHub and reinstall."""
+    import subprocess
+
+    repo = "git+https://github.com/dalpan/nexa.git"
+    console.print(f"[bold]Upgrading NEXA[/bold] from GitHub...")
+    console.print(f"[dim]Current version: v{__version__}[/dim]")
+
+    result = subprocess.run(
+        ["pipx", "install", repo, "--force"],
+        capture_output=True,
+        text=True,
+    )
+
+    if result.returncode != 0:
+        console.print(f"[bold red]Upgrade failed.[/bold red]")
+        console.print(f"[dim]{result.stderr.strip()}[/dim]")
+        raise typer.Exit(1)
+
+    # Extract installed version from pipx output
+    new_version = __version__
+    for line in result.stdout.splitlines():
+        if "installed package nexa" in line:
+            parts = line.split()
+            idx = parts.index("nexa") + 1 if "nexa" in parts else -1
+            if idx > 0 and idx < len(parts):
+                new_version = parts[idx].rstrip(",")
+            break
+
+    console.print(f"[bold green]✓ Upgraded to nexa v{new_version}[/bold green]")
+
+
 def main() -> None:
     app()
 
