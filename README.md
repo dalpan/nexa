@@ -1,96 +1,116 @@
-# NEXA
-**N**ative **E**xposure & **X**-ray **A**nalyzer
+<div align="center">
 
-> Frontend Exposure & Secret Detection — for authorized security assessments only.
+<h1>NEXA</h1>
+<h4>Frontend Exposure & Secret Detection</h4>
 
-NEXA is a passive frontend security scanner that discovers exposed secrets, API keys, credentials, and sensitive data in JavaScript bundles, source maps, and HTML of web applications.
+<p>
+  <a href="#install">Install</a> •
+  <a href="#usage">Usage</a> •
+  <a href="#pipe-mode">Pipe Mode</a> •
+  <a href="#options">Options</a> •
+  <a href="#detection-coverage">Detection Coverage</a>
+</p>
+
+</div>
+
+---
+
+NEXA is a fast, passive frontend security scanner that crawls web applications and detects exposed secrets, API keys, credentials, and sensitive data inside JavaScript bundles, source maps, and HTML.
+
+Built for bug bounty hunters and pentesters. Works standalone or chained with tools like `subfinder`, `httpx`, and `jq`.
 
 ---
 
 ## Features
 
-- **Secret detection** — AWS keys, Google API keys, Stripe keys, GitHub PATs, JWTs, Slack tokens, Sentry DSNs, and 25+ patterns
-- **Framework fingerprinting** — Next.js, Nuxt, React, Vue, Angular, Vite, Svelte, Webpack, Astro, Gatsby
-- **Source map detection** — publicly accessible `.map` files that expose original source code
-- **`__NEXT_DATA__` extraction** — scans SSR props for embedded credentials
+- Detects **AWS, Google, Stripe, GitHub, Slack, Sentry, Twilio**, and 25+ secret patterns
+- **High-entropy string detection** with context-aware scoring
+- **Source map discovery** — `.map` files that leak original source code
+- **`__NEXT_DATA__` extraction** — scans Next.js SSR props for embedded credentials
+- **Framework fingerprinting** — Next.js, Nuxt, React, Vue, Angular, Vite, Svelte, Astro
 - **Subdomain discovery** — passive enumeration via crt.sh + HackerTarget
-- **WAF/ISP detection** — detects Cloudflare, Akamai, Sucuri, ISP blocks with clear warnings
-- **WAF bypass mode** — User-Agent rotation, Sec-Fetch headers, jitter, cookie persistence
-- **Pipe-friendly** — works with `subfinder`, `httpx`, `jq`, and other tools
-- **Multiple output formats** — rich terminal table, JSON, JSON Lines (JSONL)
-- **Passive only** — no state-changing requests, safe for authorized assessments
+- **WAF/ISP detection** — Cloudflare, Akamai, Sucuri, ISP blocks with clear warnings
+- **WAF bypass mode** — UA rotation, jitter, cookie persistence, Sec-Fetch headers
+- **Pipe-friendly** — progress to stderr, findings to stdout, JSONL output for chaining
+- **Passive only** — no state-changing requests
 
 ---
 
 ## Install
 
-### System-wide (recommended)
+**Requirements:** Python 3.11+ and [pipx](https://pipx.pypa.io/stable/) (`brew install pipx` on macOS)
+
 ```bash
 git clone https://github.com/dalpan/nexa
 cd nexa
-make install     # uses pipx — nexa available anywhere in terminal
+make install
 ```
 
-### Requirements
-- Python 3.11+
-- [pipx](https://pipx.pypa.io/stable/) (`brew install pipx` on macOS)
+`nexa` will be available system-wide — no need to activate a venv.
 
-### Update after changes
+### Update
+
 ```bash
-cd nexa && make update
+make update
 ```
+
+Output will show the installed version, e.g. `installed package nexa 1.1.0`.
 
 ---
 
 ## Usage
 
 ```bash
+nexa scan <target>
+```
+
+```bash
 # Basic scan
 nexa scan target.com
 
-# Deeper scan with WAF bypass
-nexa scan target.com --depth 3 --waf-bypass --waf-strategy aggressive
+# Deeper crawl
+nexa scan target.com --depth 3 --max-pages 100
 
 # Skip subdomain discovery (faster)
 nexa scan target.com --no-subdomain
 
-# Only show HIGH and above
+# Show only HIGH and above
 nexa scan target.com --min-severity HIGH
 
-# Export CSV
-nexa scan target.com --export-csv
+# WAF bypass mode
+nexa scan target.com --waf-bypass
+
+# Save JSON + CSV report
+nexa scan target.com --output-dir ./results --export-csv
+
+# Check version
+nexa version
 ```
 
-### Pipe Mode (combine with other tools)
+---
+
+## Pipe Mode
+
+NEXA reads targets from stdin when no target argument is given — progress goes to stderr, findings to stdout, so pipes stay clean.
 
 ```bash
-# subfinder -> httpx -> nexa
+# subfinder → httpx → nexa
 subfinder -d target.com | httpx | nexa scan
 
-# Filter HIGH+ findings with jq
-subfinder -d target.com | httpx | nexa scan --format jsonl \
-  | jq 'select(.severity=="HIGH" or .severity=="CRITICAL")'
-
 # Scan a list of targets
-cat targets.txt | nexa scan --format jsonl
+cat targets.txt | nexa scan
 
-# or use --list flag
+# or with --list flag
 nexa scan --list targets.txt
 
-# Full pipeline example
+# Filter CRITICAL findings with jq
+subfinder -d target.com | httpx | nexa scan --format jsonl \
+  | jq 'select(.severity == "CRITICAL")'
+
+# Extract values only
 nexa scan target.com --format jsonl \
-  | jq -r 'select(.severity=="CRITICAL") | "\(.title): \(.value)"'
+  | jq -r 'select(.severity == "CRITICAL") | "\(.title): \(.value)"'
 ```
-
-### Output Formats
-
-| Flag | Description |
-|------|-------------|
-| `--format text` | Rich terminal table (default) |
-| `--format jsonl` | One JSON per line — pipe-friendly |
-| `--format json` | Full JSON report to stdout |
-
-Progress output always goes to **stderr** so stdout stays clean for piping.
 
 ---
 
@@ -98,23 +118,60 @@ Progress output always goes to **stderr** so stdout stays clean for piping.
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--depth` | 2 | Crawl depth |
-| `--max-pages` | 50 | Max pages to crawl |
-| `--concurrency` | 10 | Concurrent requests |
-| `--timeout` | 15 | Request timeout (seconds) |
-| `--rate-limit` | 5.0 | Requests per second |
-| `--min-severity` | INFO | Filter by severity |
-| `--no-subdomain` | — | Skip subdomain discovery |
-| `--no-www` | — | Skip www. variant crawl |
-| `--crawl-subdomains` | — | Also crawl discovered subdomains |
-| `--historical-urls` | — | Fetch URLs from Wayback Machine |
-| `--waf-bypass` | — | Enable WAF bypass mode |
-| `--waf-strategy` | rotate | rotate / random / aggressive |
-| `--format / -f` | text | text / json / jsonl |
-| `--quiet / -q` | — | Suppress progress output |
-| `--export-csv` | — | Export findings to CSV |
+| `--depth` | `2` | Crawl depth |
+| `--max-pages` | `50` | Max pages to crawl |
+| `--concurrency` | `10` | Concurrent requests |
+| `--timeout` | `20` | Request timeout in seconds |
+| `--rate-limit` | `5.0` | Requests per second |
+| `--min-severity` | `INFO` | Minimum severity to show (`INFO/LOW/MEDIUM/HIGH/CRITICAL`) |
+| `--format / -f` | `text` | Output format: `text` / `json` / `jsonl` |
+| `--output-dir` | auto | Directory to save JSON/Markdown reports |
+| `--export-csv` | off | Also export findings as CSV |
 | `--list / -l` | — | File with one target per line |
-| `--url` | — | Extra URL to include (repeatable) |
+| `--url` | — | Extra URL to include in scan (repeatable) |
+| `--no-subdomain` | off | Skip subdomain discovery |
+| `--no-www` | off | Skip www. variant crawl |
+| `--crawl-subdomains` | off | Also crawl discovered subdomains |
+| `--historical-urls` | off | Fetch URLs from Wayback Machine CDX |
+| `--waf-bypass` | off | Enable WAF bypass mode |
+| `--waf-strategy` | `rotate` | `rotate` / `random` / `aggressive` |
+| `--quiet / -q` | off | Suppress progress output |
+| `--verbose` | off | Debug logging |
+
+---
+
+## Detection Coverage
+
+| Category | Examples | Severity |
+|----------|----------|----------|
+| AWS | Access Key ID (`AKIA…`), Secret Access Key | CRITICAL |
+| Stripe | Secret key (`sk_live_…`), Publishable key (`pk_…`) | CRITICAL / MEDIUM |
+| GitHub | PAT (`ghp_…`), Fine-grained PAT (`github_pat_…`) | CRITICAL |
+| Google | API Key (`AIza…`), OAuth Client ID, reCAPTCHA | HIGH / MEDIUM |
+| Slack | Bot token (`xoxb-…`), Incoming webhook URL | HIGH |
+| Twilio | Account SID, Auth Token | HIGH / CRITICAL |
+| SendGrid | API key (`SG.…`) | CRITICAL |
+| Sentry | DSN URL | MEDIUM |
+| Mapbox | Access token (`pk.eyJ1…`) | HIGH |
+| JWT | `eyJ…eyJ…` tokens | HIGH |
+| Credentials | Hardcoded password, secret, auth header | HIGH |
+| PII | Email addresses, phone numbers, SSN | LOW |
+| Internal Endpoints | Private IPs, admin paths, internal API routes | MEDIUM / LOW |
+| Source Maps | Publicly accessible `.map` files | MEDIUM |
+| Env Config | `NEXT_PUBLIC_`, `VITE_`, `REACT_APP_` vars | INFO |
+| High Entropy | Unknown secrets detected by entropy scoring | LOW |
+
+---
+
+## Output Formats
+
+| Format | Description |
+|--------|-------------|
+| `text` (default) | Rich color table in terminal |
+| `jsonl` | One JSON object per finding — best for piping |
+| `json` | Full scan result as a single JSON object |
+
+Reports (JSON + Markdown) are saved automatically to `./nexa-output/<target>/`.
 
 ---
 
@@ -122,34 +179,23 @@ Progress output always goes to **stderr** so stdout stays clean for piping.
 
 | Code | Meaning |
 |------|---------|
-| 0 | Scan complete, no CRITICAL findings |
-| 1 | Error |
-| 2 | CRITICAL findings detected |
-| 130 | Interrupted (Ctrl+C) |
-
----
-
-## Severity Levels
-
-| Level | Examples |
-|-------|---------|
-| CRITICAL | AWS keys, Stripe secret keys, GitHub PATs, private keys |
-| HIGH | Google API keys, JWT tokens, hardcoded passwords |
-| MEDIUM | Generic API keys, Sentry DSNs, source maps, internal routes |
-| LOW | Email addresses, internal IPs, admin paths |
-| INFO | Public env vars, framework info, WAF detection |
-
----
-
-## Disclaimer
-
-NEXA is intended for **authorized security assessments only**. Only scan targets you have explicit permission to test. The authors are not responsible for misuse.
+| `0` | Scan complete, no CRITICAL findings |
+| `1` | Error |
+| `2` | CRITICAL findings detected |
+| `130` | Interrupted (Ctrl+C) |
 
 ---
 
 ## Development
 
 ```bash
-make dev      # setup .venv
-make test     # run tests
+make dev    # set up local .venv
+make test   # run test suite
+make smoke  # quick smoke test against a live target
 ```
+
+---
+
+## Disclaimer
+
+NEXA is intended for **authorized security assessments only**. Only scan targets you have explicit permission to test. The authors are not responsible for misuse.
