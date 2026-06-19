@@ -1,16 +1,18 @@
 <div align="center">
 
-<img src="assets/banner.svg" alt="NEXA — Credential &amp; Secret Scanner" width="100%"/>
-
-<br/>
-<br/>
+```
+  _  _ _______  ___   
+ | \| | ____\ \/ / \  
+ | .` |  _|  >  < / _ 
+ |_|\_|___| /_/\_/_/ \_   v1.5.1
+  Credential & Secret Scanner
+```
 
 <a href="https://github.com/dalpan/nexa/releases/latest"><img src="https://img.shields.io/github/v/release/dalpan/nexa?color=58a6ff&label=version&style=flat-square" alt="version"/></a>
 <img src="https://img.shields.io/badge/python-3.11+-58a6ff?style=flat-square" alt="python"/>
 <img src="https://img.shields.io/badge/license-MIT-3fb950?style=flat-square" alt="license"/>
 <img src="https://img.shields.io/badge/for-bug%20bounty-f85149?style=flat-square" alt="bug bounty"/>
 
-<br/>
 <br/>
 
 <p>
@@ -27,9 +29,7 @@
 
 NEXA is a fast, passive credential and secret scanner for frontend web applications. It crawls target sites and hunts for exposed API keys, hardcoded credentials, auth tokens, and secrets buried inside JavaScript bundles, source maps, HTML, and server-side rendered framework state payloads.
 
-Built for bug bounty hunters and pentesters. Inspired by a real finding on a Kraken subsidiary where WebSocket API credentials (`wsApiKeyId` + `wsApiKeyPassword`) were exposed inside a `__NEXT_DATA__` SSR payload — directly usable to authenticate against backend APIs.
-
-Works standalone or chained with `subfinder`, `httpx`, and `jq`.
+Built for bug bounty hunters and pentesters. Works standalone or chained with `subfinder`, `httpx`, and `jq`.
 
 ---
 
