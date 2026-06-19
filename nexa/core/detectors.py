@@ -1,20 +1,21 @@
-"""Core detection engine: credential/secret/PII detection with entropy + regex."""
+"""Core detection engine — focused on findings with real bug bounty impact."""
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import logging
 import re
-from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Iterator, Optional
 
 from nexa.models import Category, Finding, Severity
 from nexa.utils import get_context_window, is_placeholder, luhn_check, shannon_entropy
 
 logger = logging.getLogger(__name__)
 
-# ── Detection patterns ─────────────────────────────────────────────────────────
+
+from dataclasses import dataclass
+
 
 @dataclass
 class DetectionPattern:
@@ -22,7 +23,7 @@ class DetectionPattern:
     category: Category
     severity: Severity
     pattern: re.Pattern
-    value_group: int = 1       # regex group containing the secret value
+    value_group: int = 1
     base_confidence: int = 70
     description: str = ""
     provider: str = ""
@@ -32,8 +33,17 @@ def _c(pattern: str, flags: int = 0) -> re.Pattern:
     return re.compile(pattern, flags)
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+# PATTERNS — only include things that have direct bug bounty impact
+# Philosophy: if it can be used to authenticate / access data → report it
+#             if it's just "looks suspicious in minified JS" → don't report it
+# ──────────────────────────────────────────────────────────────────────────────
+
 PATTERNS: list[DetectionPattern] = [
-    # ── API Keys ──────────────────────────────────────────────────────────────
+
+    # ── Tier 1: Direct authentication credentials ─────────────────────────────
+    # These can be copy-pasted into curl and immediately used
+
     DetectionPattern(
         name="AWS Access Key ID",
         category=Category.API_KEY,
@@ -62,51 +72,6 @@ PATTERNS: list[DetectionPattern] = [
         provider="Google",
     ),
     DetectionPattern(
-        name="Google OAuth Client ID",
-        category=Category.API_KEY,
-        severity=Severity.MEDIUM,
-        pattern=_c(r"\b([0-9]+-[0-9A-Za-z_]{32}\.apps\.googleusercontent\.com)\b"),
-        value_group=1,
-        base_confidence=92,
-        provider="Google",
-    ),
-    DetectionPattern(
-        name="Stripe Publishable Key",
-        category=Category.API_KEY,
-        severity=Severity.MEDIUM,
-        pattern=_c(r"\b(pk_(?:test|live)_[0-9a-zA-Z]{24,})\b"),
-        value_group=1,
-        base_confidence=95,
-        provider="Stripe",
-    ),
-    DetectionPattern(
-        name="Stripe Secret Key",
-        category=Category.API_KEY,
-        severity=Severity.CRITICAL,
-        pattern=_c(r"\b(sk_(?:test|live)_[0-9a-zA-Z]{24,})\b"),
-        value_group=1,
-        base_confidence=95,
-        provider="Stripe",
-    ),
-    DetectionPattern(
-        name="Twilio Account SID",
-        category=Category.API_KEY,
-        severity=Severity.HIGH,
-        pattern=_c(r"\b(AC[a-z0-9]{32})\b"),
-        value_group=1,
-        base_confidence=85,
-        provider="Twilio",
-    ),
-    DetectionPattern(
-        name="Twilio Auth Token",
-        category=Category.API_KEY,
-        severity=Severity.CRITICAL,
-        pattern=_c(r"\b(SK[a-z0-9]{32})\b"),
-        value_group=1,
-        base_confidence=80,
-        provider="Twilio",
-    ),
-    DetectionPattern(
         name="GitHub Personal Access Token",
         category=Category.API_KEY,
         severity=Severity.CRITICAL,
@@ -123,6 +88,15 @@ PATTERNS: list[DetectionPattern] = [
         value_group=1,
         base_confidence=98,
         provider="GitHub",
+    ),
+    DetectionPattern(
+        name="Stripe Secret Key",
+        category=Category.API_KEY,
+        severity=Severity.CRITICAL,
+        pattern=_c(r"\b(sk_(?:test|live)_[0-9a-zA-Z]{24,})\b"),
+        value_group=1,
+        base_confidence=95,
+        provider="Stripe",
     ),
     DetectionPattern(
         name="Slack Token",
@@ -143,33 +117,6 @@ PATTERNS: list[DetectionPattern] = [
         provider="Slack",
     ),
     DetectionPattern(
-        name="Sentry DSN",
-        category=Category.API_KEY,
-        severity=Severity.MEDIUM,
-        pattern=_c(r"(https://[0-9a-f]{32}@[a-z0-9.\-]+\.sentry\.io/[0-9]+)"),
-        value_group=1,
-        base_confidence=92,
-        provider="Sentry",
-    ),
-    DetectionPattern(
-        name="Mapbox Access Token",
-        category=Category.API_KEY,
-        severity=Severity.HIGH,
-        pattern=_c(r"\b(pk\.eyJ1[a-zA-Z0-9\-_=]+)"),
-        value_group=1,
-        base_confidence=90,
-        provider="Mapbox",
-    ),
-    DetectionPattern(
-        name="Supabase Anon Key",
-        category=Category.API_KEY,
-        severity=Severity.MEDIUM,
-        pattern=_c(r'["\']?(eyJ[a-zA-Z0-9_\-]{50,}\.[a-zA-Z0-9_\-]{50,}\.[a-zA-Z0-9_\-]{20,})["\']?'),
-        value_group=1,
-        base_confidence=70,
-        provider="Supabase/JWT",
-    ),
-    DetectionPattern(
         name="SendGrid API Key",
         category=Category.API_KEY,
         severity=Severity.CRITICAL,
@@ -179,35 +126,97 @@ PATTERNS: list[DetectionPattern] = [
         provider="SendGrid",
     ),
     DetectionPattern(
-        name="Generic API Key",
+        name="Twilio Auth Token",
         category=Category.API_KEY,
-        severity=Severity.MEDIUM,
-        pattern=_c(r'(?i)(?:api[_\-]?key|apikey)\s*[:=]\s*["\']([a-zA-Z0-9_\-]{20,60})["\']'),
-        value_group=1,
-        base_confidence=55,
-    ),
-    # ── Auth Tokens ──────────────────────────────────────────────────────────
-    DetectionPattern(
-        name="JSON Web Token",
-        category=Category.AUTH_TOKEN,
-        severity=Severity.HIGH,
-        pattern=_c(r"\b(eyJ[a-zA-Z0-9_\-]{10,}\.eyJ[a-zA-Z0-9_\-]{10,}\.[a-zA-Z0-9_\-]{10,})\b"),
+        severity=Severity.CRITICAL,
+        pattern=_c(r"\b(SK[a-z0-9]{32})\b"),
         value_group=1,
         base_confidence=80,
+        provider="Twilio",
     ),
     DetectionPattern(
-        name="Bearer Token",
-        category=Category.AUTH_TOKEN,
+        name="Private Key",
+        category=Category.CREDENTIAL,
+        severity=Severity.CRITICAL,
+        pattern=_c(r"(-----BEGIN (?:RSA |EC |DSA )?PRIVATE KEY-----)"),
+        value_group=1,
+        base_confidence=99,
+    ),
+
+    # ── Tier 2: Credentials in JSON/HTML payload (the Kraken finding class) ──────
+    # Credentials embedded in __NEXT_DATA__, __NUXT__, __remixContext, __GATSBY__,
+    # SvelteKit state, and generic inline JS config objects.
+    # These are directly usable — copy to Authorization header and curl.
+
+    # 2a. Base64-encoded Basic Auth in JSON field (any framework state payload)
+    # Matches: "wsApiKeyPassword":"dXNlcm5hbWU6cGFzc3dvcmQ=", "authorization":"...", etc.
+    DetectionPattern(
+        name="Basic Auth Credential in JSON",
+        category=Category.CREDENTIAL,
+        severity=Severity.CRITICAL,
+        pattern=_c(
+            r'["\']?[a-zA-Z]{0,40}(?:authorization|basicAuth|basic_auth|wsApiKey|wsApiKeyPassword'
+            r'|apiPassword|clientCredential|apiCredential|bearerToken|accessCredential'
+            r'|x-api-key|x_api_key|apitoken|api_token)[a-zA-Z0-9_]{0,20}["\']?'
+            r'\s*[:=]\s*["\']([A-Za-z0-9+/]{20,}={0,2})["\']',
+            re.IGNORECASE,
+        ),
+        value_group=1,
+        base_confidence=85,
+        description="Base64-encoded credential — likely Basic Auth (user:pass). Decode and test against backend APIs.",
+    ),
+    # 2b. Literal "Basic <base64>" value anywhere — catch it regardless of field name
+    DetectionPattern(
+        name="Basic Auth Header Value",
+        category=Category.CREDENTIAL,
+        severity=Severity.CRITICAL,
+        pattern=_c(r'["\']?(Basic\s+[A-Za-z0-9+/]{20,}={0,2})["\']?'),
+        value_group=1,
+        base_confidence=88,
+        description="Literal Basic Auth value — copy directly to Authorization header.",
+    ),
+    # 2c. Hardcoded credential in JS variable (var/let/const/window assignment)
+    # Catches: const apiKey = "sk_live_...", window.AUTH_TOKEN = "...", let password = "..."
+    DetectionPattern(
+        name="Hardcoded Credential in JS Variable",
+        category=Category.CREDENTIAL,
         severity=Severity.HIGH,
-        pattern=_c(r'(?i)bearer\s+([a-zA-Z0-9_\-\.]{20,})'),
+        pattern=_c(
+            r'(?:(?:var|let|const)\s+[a-zA-Z_$][a-zA-Z0-9_$]{0,30}'
+            r'(?:key|token|secret|password|passwd|credential|auth|apikey|api_key|bearer)[a-zA-Z0-9_$]{0,20}'
+            r'|window\.[a-zA-Z_$][a-zA-Z0-9_$]{0,10}'
+            r'(?:key|token|secret|password|passwd|credential|auth|apikey|api_key|bearer)[a-zA-Z0-9_$]{0,20})'
+            r'\s*=\s*["\']([^"\']{8,200})["\']',
+            re.IGNORECASE,
+        ),
+        value_group=1,
+        base_confidence=70,
+        description="Hardcoded credential assigned to JS variable — check if actively used in requests.",
+    ),
+    # 2d. Credential in JS object property (covers all frameworks' config objects)
+    # Catches: { apiKey: "...", token: "...", password: "...", secret: "..." }
+    # Both quoted and unquoted property names (JS object syntax)
+    DetectionPattern(
+        name="Credential in JS Object",
+        category=Category.CREDENTIAL,
+        severity=Severity.HIGH,
+        pattern=_c(
+            r'(?:^|[{,\s])\s*["\']?'
+            r'(?:apiKey|api_key|accessKey|access_key|secretKey|secret_key'
+            r'|authToken|auth_token|accessToken|access_token|refreshToken|refresh_token'
+            r'|clientSecret|client_secret|appSecret|app_secret'
+            r'|password|passwd|pwd|credentials?)'
+            r'["\']?\s*:\s*["\']([^"\'$`\s]{8,200})["\']',
+            re.IGNORECASE,
+        ),
         value_group=1,
         base_confidence=65,
+        description="Credential value in JS/JSON object — verify it is used in real requests.",
     ),
     DetectionPattern(
         name="Basic Auth in URL",
         category=Category.AUTH_TOKEN,
         severity=Severity.CRITICAL,
-        # Strict: user must be [a-zA-Z0-9._%-] only; password alphanumeric+symbols but NO quotes/commas/spaces
         pattern=_c(r"(https?://[a-zA-Z0-9._%-]{2,60}:[a-zA-Z0-9!$%^&*_+\-]{5,100}@[a-zA-Z0-9.\-]+(?::\d+)?(?:/[^\s'\"<>]*)?)"),
         value_group=1,
         base_confidence=85,
@@ -220,13 +229,11 @@ PATTERNS: list[DetectionPattern] = [
         value_group=1,
         base_confidence=70,
     ),
-    # ── Credentials ──────────────────────────────────────────────────────────
     DetectionPattern(
         name="Hardcoded Password",
         category=Category.CREDENTIAL,
         severity=Severity.HIGH,
-        # Removed bare "pass" — too common in minified JS (passphrase, bypass, compass, etc.)
-        pattern=_c(r'(?i)(?:password|passwd|pwd)\s*[:=]\s*["\']([^"\']{4,})["\']'),
+        pattern=_c(r'(?i)(?:password|passwd|pwd)\s*[:=]\s*["\']([^"\']{6,})["\']'),
         value_group=1,
         base_confidence=60,
     ),
@@ -234,60 +241,97 @@ PATTERNS: list[DetectionPattern] = [
         name="Hardcoded Secret",
         category=Category.CREDENTIAL,
         severity=Severity.HIGH,
-        pattern=_c(r'(?i)(?:secret|client_secret|app_secret)\s*[:=]\s*["\']([^"\']{4,})["\']'),
+        pattern=_c(r'(?i)(?:client_secret|app_secret)\s*[:=]\s*["\']([^"\']{8,})["\']'),
         value_group=1,
-        base_confidence=60,
+        base_confidence=65,
     ),
     DetectionPattern(
-        name="Private Key",
+        name="JSON Web Token",
+        category=Category.AUTH_TOKEN,
+        severity=Severity.HIGH,
+        pattern=_c(r"\b(eyJ[a-zA-Z0-9_\-]{10,}\.eyJ[a-zA-Z0-9_\-]{10,}\.[a-zA-Z0-9_\-]{10,})\b"),
+        value_group=1,
+        base_confidence=80,
+    ),
+    DetectionPattern(
+        name="JSON Password Field",
         category=Category.CREDENTIAL,
-        severity=Severity.CRITICAL,
-        pattern=_c(r"(-----BEGIN (?:RSA |EC |DSA )?PRIVATE KEY-----)"),
+        severity=Severity.HIGH,
+        pattern=_c(
+            r'"[a-zA-Z]{0,30}(?:password|passwd|pwd|secret|apiSecret)[a-zA-Z]{0,20}"\s*:\s*"([^"]{6,200})"',
+            re.IGNORECASE,
+        ),
         value_group=1,
-        base_confidence=99,
+        base_confidence=72,
     ),
-    # ── PII ──────────────────────────────────────────────────────────────────
+    # Companion to JSON Password Field — catches the "username" / key ID side of the pair.
+    # e.g. "wsApiKeyId":"cfbenchmarksws2" paired with "wsApiKeyPassword":"uuid"
     DetectionPattern(
-        name="Email Address",
-        category=Category.PII,
-        severity=Severity.LOW,
-        pattern=_c(r"\b([a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})\b"),
+        name="JSON Credential Key ID",
+        category=Category.CREDENTIAL,
+        severity=Severity.HIGH,
+        pattern=_c(
+            r'"[a-zA-Z]{0,40}(?:wsApiKeyId|apiKeyId|api_key_id|clientId|client_id|keyId|key_id'
+            r'|accessKeyId|access_key_id|accountId|account_id|keyName|key_name'
+            r'|userName|user_name|loginName|login_name)[a-zA-Z0-9]{0,20}"\s*:\s*"([^"]{4,100})"',
+            re.IGNORECASE,
+        ),
         value_group=1,
         base_confidence=70,
+        description="API key ID or username — check for paired password/secret field nearby in the same JSON payload.",
     ),
+    # 2e. Generic API key in fetch/axios/XMLHttpRequest call
+    # Catches: fetch(url, { headers: { 'x-api-key': '...' } })
+    # Note: use [\s\S] not [^"'] so the intermediate chars can contain quotes
     DetectionPattern(
-        name="International Phone Number",
-        category=Category.PII,
-        severity=Severity.LOW,
-        pattern=_c(r"(\+[1-9]\d{6,14})\b"),
-        value_group=1,
-        base_confidence=60,
-    ),
-    DetectionPattern(
-        name="Social Security Number",
-        category=Category.PII,
-        severity=Severity.LOW,
-        pattern=_c(r"\b(\d{3}-\d{2}-\d{4})\b"),
-        value_group=1,
-        base_confidence=40,
-    ),
-    DetectionPattern(
-        name="Credit Card Number",
-        category=Category.PII,
+        name="API Key in HTTP Request",
+        category=Category.API_KEY,
         severity=Severity.HIGH,
-        pattern=_c(r"\b(4[0-9]{15}|5[1-5][0-9]{14})\b"),
+        pattern=_c(
+            r'(?:fetch|axios|request|got|superagent|http\.get|http\.post)'
+            r'[\s\S]{0,300}'
+            r'["\'](?:x-api-key|x-auth-token|api-key|apikey|api_key|authorization)["\']'
+            r'\s*:\s*["\']([^"\']{8,200})["\']',
+            re.IGNORECASE,
+        ),
         value_group=1,
-        base_confidence=40,
+        base_confidence=75,
+        description="API key passed in HTTP request headers — directly usable.",
     ),
-    # ── Internal Endpoints ───────────────────────────────────────────────────
+    # Stripe publishable key — INFO only, public by design but worth logging
     DetectionPattern(
-        name="Internal IP/Host",
+        name="Stripe Publishable Key",
+        category=Category.API_KEY,
+        severity=Severity.INFO,
+        pattern=_c(r"\b(pk_(?:test|live)_[0-9a-zA-Z]{24,})\b"),
+        value_group=1,
+        base_confidence=95,
+        provider="Stripe",
+    ),
+
+    # ── Tier 3: Monitoring / analytics keys ───────────────────────────────────
+    # Lower impact but valid — Sentry DSN leaks error data including stack traces
+
+    DetectionPattern(
+        name="Sentry DSN",
+        category=Category.API_KEY,
+        severity=Severity.MEDIUM,
+        pattern=_c(r"(https://[0-9a-f]{32}@[a-z0-9.\-]+\.sentry\.io/[0-9]+)"),
+        value_group=1,
+        base_confidence=92,
+        provider="Sentry",
+    ),
+
+    # ── Tier 4: Internal endpoints worth noting ────────────────────────────────
+
+    DetectionPattern(
+        name="Internal Network URL",
         category=Category.INTERNAL_ENDPOINT,
         severity=Severity.MEDIUM,
-        # Each octet constrained to 0-255 to avoid matching SVG coordinates like 10.934.701.758
+        # Private IP ranges appearing in JS — not localhost (always dev defaults)
         pattern=_c(
-            r"(?:https?://)?(?:localhost|127\.0\.0\.1|0\.0\.0\.0"
-            r"|192\.168\.(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]\d|\d)\.(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]\d|\d)"
+            r"(?:https?://)"
+            r"(?:192\.168\.(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]\d|\d)\.(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]\d|\d)"
             r"|10\.(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]\d|\d)\.(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]\d|\d)\.(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]\d|\d)"
             r"|172\.(?:1[6-9]|2\d|3[01])\.(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]\d|\d)\.(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]\d|\d))"
             r"(?::\d{1,5})?(?:/[^\s'\"<>]*)?"
@@ -295,241 +339,62 @@ PATTERNS: list[DetectionPattern] = [
         value_group=0,
         base_confidence=80,
     ),
-    DetectionPattern(
-        name="Admin/Internal Path",
-        category=Category.INTERNAL_ENDPOINT,
-        severity=Severity.LOW,
-        # Require the word to appear as a URL path segment (slash-delimited), not as a standalone word
-        pattern=_c(
-            r'/(admin|dashboard|backoffice|internal|management|ops|devtools)/[^\s"\'<>]*',
-            re.IGNORECASE,
-        ),
-        value_group=0,
-        base_confidence=50,
-    ),
-    DetectionPattern(
-        name="Private API Route",
-        category=Category.INTERNAL_ENDPOINT,
-        severity=Severity.MEDIUM,
-        pattern=_c(r"(/api/v\d+/(?:admin|internal|private|system|management)[^\s'\"<>]*)", re.IGNORECASE),
-        value_group=1,
-        base_confidence=65,
-    ),
-    # ── Env Config ───────────────────────────────────────────────────────────
-    DetectionPattern(
-        name="NEXT_PUBLIC_ Env Var",
-        category=Category.ENV_CONFIG,
-        severity=Severity.INFO,
-        pattern=_c(r'["\']?(NEXT_PUBLIC_[A-Z0-9_]+)["\']?\s*[:=]\s*["\']([^"\']{3,})["\']'),
-        value_group=2,
-        base_confidence=80,
-    ),
-    DetectionPattern(
-        name="VITE_ Env Var",
-        category=Category.ENV_CONFIG,
-        severity=Severity.INFO,
-        pattern=_c(r'["\']?(VITE_[A-Z0-9_]+)["\']?\s*[:=]\s*["\']([^"\']{3,})["\']'),
-        value_group=2,
-        base_confidence=80,
-    ),
-    DetectionPattern(
-        name="REACT_APP_ Env Var",
-        category=Category.ENV_CONFIG,
-        severity=Severity.INFO,
-        pattern=_c(r'["\']?(REACT_APP_[A-Z0-9_]+)["\']?\s*[:=]\s*["\']([^"\']{3,})["\']'),
-        value_group=2,
-        base_confidence=80,
-    ),
-    DetectionPattern(
-        name="process.env Assignment",
-        category=Category.ENV_CONFIG,
-        severity=Severity.INFO,
-        pattern=_c(r'process\.env\.([A-Z_][A-Z0-9_]*)\s*[=:]\s*["\']([^"\']{3,})["\']'),
-        value_group=2,
-        base_confidence=65,
-    ),
-    # ── JSON / __NEXT_DATA__ credential patterns ─────────────────────────────
-    # Catches "wsApiKeyPassword":"uuid", "apiPassword":"value", etc. in JSON blobs
-    DetectionPattern(
-        name="JSON Password Field",
-        category=Category.CREDENTIAL,
-        severity=Severity.HIGH,
-        pattern=_c(
-            r'"[a-zA-Z]{0,30}(?:password|passwd|pwd|secret|apiSecret)[a-zA-Z]{0,20}"\s*:\s*"([^"]{4,200})"',
-            re.IGNORECASE,
-        ),
-        value_group=1,
-        base_confidence=72,
-    ),
-    DetectionPattern(
-        name="JSON API Key/Token Field",
-        category=Category.API_KEY,
-        severity=Severity.HIGH,
-        pattern=_c(
-            r'"[a-zA-Z]{0,30}(?:apiKey|api_key|access_key|accessKey|clientSecret|client_secret|authToken|auth_token|wsApiKey[a-zA-Z]*)[a-zA-Z]{0,20}"\s*:\s*"([^"]{8,200})"',
-            re.IGNORECASE,
-        ),
-        value_group=1,
-        base_confidence=68,
-    ),
-    # Google reCAPTCHA site key (public by design — INFO only)
-    DetectionPattern(
-        name="Google reCAPTCHA Site Key",
-        category=Category.API_KEY,
-        severity=Severity.INFO,
-        pattern=_c(r'\b(6Le[a-zA-Z0-9_\-]{36,38})\b'),
-        value_group=1,
-        base_confidence=85,
-        provider="Google reCAPTCHA",
-        description="Public site key — intentionally embedded in frontend. Confirms reCAPTCHA usage.",
-    ),
-    # Generic keyword:value in JSON — catches keys ending in Key, Token, Secret, Password
-    DetectionPattern(
-        name="JSON Credential-Like Key",
-        category=Category.CREDENTIAL,
-        severity=Severity.MEDIUM,
-        pattern=_c(
-            r'"[a-zA-Z0-9_]{3,40}(?:Key|Token|Secret|Password|Credential|Auth)"\s*:\s*"([a-zA-Z0-9_\-\.]{12,200})"',
-        ),
-        value_group=1,
-        base_confidence=55,
-    ),
-    # Assigned variable format: key = "value" where key ends in password/secret/token
-    # Catches output from _flatten_dict like 'pageProps.wsApiKeyPassword = "uuid"'
-    DetectionPattern(
-        name="Assigned Password/Secret Variable",
-        category=Category.CREDENTIAL,
-        severity=Severity.HIGH,
-        pattern=_c(
-            r'(?i)[a-zA-Z0-9_.]{0,40}(?:password|passwd|secret|apiKey|api_key|authToken)[a-zA-Z0-9_.]{0,20}\s*=\s*["\']([^"\']{6,200})["\']'
-        ),
-        value_group=1,
-        base_confidence=72,
-    ),
-    # WebSocket / non-HTTP service URL embedded in JS/JSON config
-    # Severity INFO — presence itself is a recon finding; callers should filter same-domain WS
-    DetectionPattern(
-        name="WebSocket/Service Endpoint in Config",
-        category=Category.INTERNAL_ENDPOINT,
-        severity=Severity.INFO,
-        pattern=_c(r'"[a-zA-Z]{2,30}(?:Url|URL|Uri|URI|Endpoint|Host)"\s*:\s*"((?:wss?|grpc|amqp)://[^"]{5,200})"'),
-        value_group=1,
-        base_confidence=70,
-    ),
-    # ── JS Vulnerability Patterns (passive) ──────────────────────────────────
-    DetectionPattern(
-        name="Dangerous eval() Usage",
-        category=Category.JS_VULN,
-        severity=Severity.HIGH,
-        pattern=_c(r'\beval\s*\(\s*(?![\'"]\s*[\'"]\s*\))[^)]{4,200}\)'),
-        value_group=0,
-        base_confidence=65,
-        description="eval() with non-literal argument — potential code injection if user-controlled.",
-    ),
-    DetectionPattern(
-        name="innerHTML with Variable",
-        category=Category.JS_VULN,
-        severity=Severity.HIGH,
-        pattern=_c(r'\.innerHTML\s*[+]?=\s*(?!["\'])([^;"\n]{4,150})'),
-        value_group=0,
-        base_confidence=60,
-        description="innerHTML assignment with non-literal value — potential DOM XSS.",
-    ),
-    DetectionPattern(
-        name="document.write() Usage",
-        category=Category.JS_VULN,
-        severity=Severity.MEDIUM,
-        pattern=_c(r'document\.write\s*\(\s*(?!["\'])[^)]{4,200}\)'),
-        value_group=0,
-        base_confidence=65,
-        description="document.write() with non-literal — potential DOM XSS.",
-    ),
-    DetectionPattern(
-        name="PostMessage Without Origin Check",
-        category=Category.JS_VULN,
-        severity=Severity.MEDIUM,
-        pattern=_c(
-            r'addEventListener\s*\(\s*["\']message["\']\s*,\s*(?:function|\([^)]*\)\s*=>)[^}]{0,500}(?!event\.origin|message\.origin|e\.origin)',
-            re.DOTALL,
-        ),
-        value_group=0,
-        base_confidence=55,
-        description="postMessage listener without origin validation — potential cross-origin data leak.",
-    ),
-    DetectionPattern(
-        name="Open Redirect Parameter",
-        category=Category.JS_VULN,
-        severity=Severity.MEDIUM,
-        pattern=_c(r'(?:location\.href|window\.location|location\.replace|location\.assign)\s*=\s*[^"\';\n]{0,20}(?:getParam|searchParams\.get|URLSearchParams|location\.search|query\[|params\[)[^;"\n]{0,100}'),
-        value_group=0,
-        base_confidence=55,
-        description="URL redirect sourced from URL parameter — potential open redirect.",
-    ),
-    DetectionPattern(
-        name="localStorage Storing Sensitive Data",
-        category=Category.JS_VULN,
-        severity=Severity.MEDIUM,
-        pattern=_c(
-            r'localStorage\.setItem\s*\(\s*["\'][^"\']*(?:token|password|secret|auth|key|credential)[^"\']*["\']\s*,',
-            re.IGNORECASE,
-        ),
-        value_group=0,
-        base_confidence=70,
-        description="Sensitive data stored in localStorage — persists across sessions, accessible by XSS.",
-    ),
 ]
 
-# Values to ignore universally
+# ──────────────────────────────────────────────────────────────────────────────
+# Filters & helpers
+# ──────────────────────────────────────────────────────────────────────────────
+
 IGNORE_VALUES: set[str] = {
     "", "null", "undefined", "false", "true", "none", "0", "1",
+    "SECRET_DO_NOT_PASS_THIS_OR_YOU_WILL_BE_FIRED",
+    "DO_NOT_USE_OR_YOU_WILL_BE_FIRED",
 }
 
-# Email allowlist patterns (example.com, noreply@ etc.)
-EMAIL_ALLOWLIST = re.compile(
-    r"@example\.(com|org|net)|@test\.(com|org)|noreply@|no-reply@|test@|admin@example|@sentry\."
-    r"|\\u[0-9a-f]{4}@|^u[0-9a-f]{4}[a-zA-Z0-9]"
-    r"|@(gmail|yahoo|hotmail|outlook)\.(com|co\.id)",  # personal emails in OSS author fields
-    re.IGNORECASE,
-)
-
-# Phone number context keywords — must appear nearby for the finding to be valid
-_PHONE_CONTEXT_RE = re.compile(r'phone|mobile|tel\b|whatsapp|sms|contact|cell', re.IGNORECASE)
-
-# Admin/Internal path documentation words — common in docs sites, not real admin panels
-_DOCS_PATH_RE = re.compile(
-    r'best-practice|archive-node|troubleshoot|snap-sync|regenesis|gas-target|gas-limit'
-    r'|key-management|fee-vault|transaction-fee|operations|metrics|snapshots|blobs',
-    re.IGNORECASE,
-)
-
-# SRI hash prefix — Subresource Integrity hashes are public, not secrets
+# SRI hash prefix
 _SRI_HASH_RE = re.compile(r'^sha(256|384|512)-', re.IGNORECASE)
 
-# Base58 alphabet — Solana/Bitcoin addresses, not secrets
-_BASE58_RE = re.compile(r'^[1-9A-HJ-NP-Za-km-z]{32,50}$')
-
-# CC context keywords — number must appear near these to be flagged as HIGH
-CC_CONTEXT_KEYWORDS = re.compile(
-    r"card|credit|payment|billing|visa|mastercard|cvv|expiry|checkout|debit",
-    re.IGNORECASE,
-)
-
-# SSN context keywords
-SSN_CONTEXT_KEYWORDS = re.compile(
-    r"ssn|social.security|tax.id|tin\b",
+# Blockchain config context — private IPs inside these are dev chain defaults
+_BLOCKCHAIN_CONTEXT_RE = re.compile(
+    r'testnet|nativeCurrency|rpcUrls|blockCreated|chainId|Anvil|Hardhat|ZKsync|Moonbeam',
     re.IGNORECASE,
 )
 
 
-def _adjust_confidence(
-    pattern: DetectionPattern,
-    value: str,
-    context: str,
-) -> int:
-    """Adjust base confidence based on entropy, context, and heuristics."""
+# Known-bad credential values that are actually identifiers/constants, not real secrets
+_PASSWORD_FP_RE = re.compile(
+    r'^[A-Z][A-Z0-9_]{4,}$'                              # SCREAMING_SNAKE_CASE: AUTH_WAITING, EMBED_WALLET_SCREEN
+    r'|^[a-z][a-zA-Z0-9]*[A-Z][a-zA-Z0-9]*$'            # camelCase with at least one uppercase: handleChange, setPassword
+    r'|^[a-z][a-z0-9_]+_(?:screen|flow|step|state|mode|type|event|action|page|view)$',  # UI state: login_screen
+    # Note: NO re.IGNORECASE — must match exactly so real passwords aren't filtered
+)
+
+# Known-bad authorization header values
+_AUTH_HEADER_FP_RE = re.compile(
+    r'^[A-Z][A-Z0-9_\-]{2,30}$'    # HTTP method names, algorithm names
+    r'|^/[a-zA-Z]'                   # URL paths
+    r'|^var\(--'                      # CSS variable references: var(--privy-color-accent)
+    r'|--[a-zA-Z]'                    # CSS custom property values
+)
+
+
+
+def _try_decode_basic_auth(value: str) -> str | None:
+    """Attempt to decode a base64 string as Basic Auth user:pass."""
+    try:
+        decoded = base64.b64decode(value + "==").decode("utf-8", errors="strict")
+        if ":" in decoded and len(decoded) >= 5:
+            user, _, pwd = decoded.partition(":")
+            # Must look like a real credential: non-trivial user and password
+            if len(user) >= 2 and len(pwd) >= 4 and not re.search(r'[\x00-\x1f]', decoded):
+                return decoded
+    except Exception:
+        pass
+    return None
+
+
+def _adjust_confidence(pattern: DetectionPattern, value: str, context: str) -> int:
     conf = pattern.base_confidence
-
-    # Entropy boost
     ent = shannon_entropy(value)
     if ent > 5.0:
         conf = min(100, conf + 10)
@@ -537,27 +402,12 @@ def _adjust_confidence(
         conf = min(100, conf + 5)
     elif ent < 3.0 and len(value) > 10:
         conf = max(0, conf - 15)
-
-    # Placeholder penalty
     if is_placeholder(value):
         conf = max(0, conf - 50)
-
-    # Context keyword boost
-    ctx_lower = context.lower()
-    boost_keywords = ("secret", "token", "key", "auth", "credential", "api", "private", "password")
-    if any(k in ctx_lower for k in boost_keywords):
-        conf = min(100, conf + 5)
-
-    # Email-specific checks
-    if pattern.category == Category.PII and "@" in value:
-        if EMAIL_ALLOWLIST.search(value):
-            conf = 0  # Kill the finding entirely — it's a known FP pattern
-
     return conf
 
 
 def _get_value(match: re.Match, pattern: DetectionPattern) -> str:
-    """Extract the relevant value from a regex match."""
     try:
         if pattern.value_group == 0:
             return match.group(0)
@@ -573,14 +423,13 @@ def detect_in_text(
     framework: str = "",
     line_offset: int = 0,
 ) -> list[Finding]:
-    """Run all detection patterns against text, returning deduplicated findings."""
+    """Run detection patterns against text. Only yields high-confidence, actionable findings."""
     findings_by_id: dict[str, Finding] = {}
 
     lines = text.splitlines(keepends=True)
 
     def line_number_for(pos: int) -> int:
-        count = 0
-        acc = 0
+        count, acc = 0, 0
         for line in lines:
             acc += len(line)
             count += 1
@@ -594,152 +443,127 @@ def detect_in_text(
                 value = _get_value(match, dp)
                 if not value or value.lower() in IGNORE_VALUES:
                     continue
-                if len(value) < 3:
+                if len(value) < 4:
                     continue
 
                 context = get_context_window(text, match.start(), match.end(), window=200)
                 confidence = _adjust_confidence(dp, value, context)
-                dp_severity = dp.severity  # default; may be overridden below
+                dp_severity = dp.severity
 
-                # Credit Card Number: require Luhn validity, adjust severity/confidence based on context
-                if dp.name == "Credit Card Number":
-                    digits = value.replace(" ", "").replace("-", "")
-                    if not luhn_check(digits):
-                        continue  # Not a real CC number — skip
-                    if CC_CONTEXT_KEYWORDS.search(context):
-                        confidence = 65
-                        dp_severity = Severity.HIGH
-                    else:
-                        confidence = 40
-                        dp_severity = Severity.INFO
+                # ── Pattern-specific filters ──────────────────────────────────
 
-                # Skip CSS variable references — var(--color-accent) etc.
-                if value.startswith("var(--"):
-                    continue
-
-                # Skip values containing JS structural characters — artifacts of minified object matching
-                if any(c in value for c in "{}()[]") and dp.category == Category.CREDENTIAL:
-                    continue
-
-                # Skip template literal / interpolation patterns — value is a variable ref, not a real secret
-                if re.search(r'[$#]\{|{{|\$\(', value):
-                    continue
-
-                if dp.name == "Hardcoded Authorization Header":
-                    # Skip CSS variables, algorithm names, URL paths, bare identifiers
-                    if re.fullmatch(r'[A-Z][A-Z0-9_\-]{2,30}', value):
+                if dp.name == "Basic Auth Credential in JSON":
+                    decoded = _try_decode_basic_auth(value)
+                    if not decoded:
                         continue
-                    if value.startswith("/"):
+                    context = f"Decoded: {decoded[:8]}... | {context}"
+                    confidence = 90
+
+                elif dp.name == "Basic Auth Header Value":
+                    # Extract just the base64 part and decode it
+                    b64_part = re.search(r'Basic\s+([A-Za-z0-9+/]{20,}={0,2})', value, re.IGNORECASE)
+                    if b64_part:
+                        decoded = _try_decode_basic_auth(b64_part.group(1))
+                        if decoded:
+                            context = f"Decoded: {decoded[:8]}... | {context}"
+                            confidence = 92
+                        else:
+                            confidence = max(confidence - 20, 20)
+
+                elif dp.name in ("Hardcoded Credential in JS Variable", "Credential in JS Object"):
+                    if shannon_entropy(value) < 3.5:
+                        continue
+                    if _PASSWORD_FP_RE.match(value):
+                        continue
+                    # Sentences (contain spaces) are error messages / strings, not credentials
+                    if ' ' in value:
+                        continue
+                    # Dunder identifiers (__name__) are internal JS/framework markers, not secrets
+                    if value.startswith('__') and value.endswith('__'):
+                        continue
+                    # Skip values that are clearly pure-word identifiers (no digits, no symbols)
+                    if re.fullmatch(r'[a-zA-Z]{4,30}', value):
+                        continue
+                    # Skip template literal placeholders
+                    if re.search(r'\$\{|\{%|<%', value):
+                        continue
+                    # Check if it could be Basic Auth (bonus: decode and annotate)
+                    decoded = _try_decode_basic_auth(value)
+                    if decoded:
+                        context = f"Decoded: {decoded[:8]}... | {context}"
+                        confidence = min(confidence + 15, 90)
+
+                elif dp.name == "API Key in HTTP Request":
+                    if shannon_entropy(value) < 3.5:
+                        continue
+                    if _PASSWORD_FP_RE.match(value):
+                        continue
+
+                elif dp.name == "Basic Auth in URL":
+                    # Skip URLs where the "password" is actually a common path component or short token
+                    if shannon_entropy(value) < 3.0:
+                        continue
+
+                elif dp.name == "Hardcoded Authorization Header":
+                    if _AUTH_HEADER_FP_RE.match(value):
                         continue
                     if re.fullmatch(r'[a-zA-Z][a-zA-Z0-9_\-]{2,39}', value) and shannon_entropy(value) < 3.5:
                         continue
 
                 elif dp.name in ("Hardcoded Password", "Hardcoded Secret"):
-                    if re.fullmatch(r'[a-zA-Z][a-zA-Z0-9_\-]{2,49}', value) and shannon_entropy(value) < 3.5:
-                        continue
-
-                elif dp.name == "Assigned Password/Secret Variable":
-                    # PascalCase component names (PasswordInput)
-                    if re.fullmatch(r'[0-9]?[A-Z][a-zA-Z0-9]{2,}', value) and re.fullmatch(r'[a-zA-Z0-9]+', value):
-                        continue
-                    # Natural language phrases
-                    if re.fullmatch(r"[A-Za-z ,.']{6,}", value):
-                        continue
-                    # Low entropy
+                    # Skip low-entropy values — they're variable names or placeholder strings
                     if shannon_entropy(value) < 3.5:
                         continue
-                    # snake_case identifiers — analytics event names, state machine keys
-                    # e.g. wallet_password_exists, user_exited_set_password_flow
-                    if re.fullmatch(r'[a-z][a-z0-9_]{4,}', value) and '_' in value:
+                    if _PASSWORD_FP_RE.match(value):
                         continue
-                    # camelCase identifiers — function/method names
-                    # e.g. setWalletRecovery, handlePasswordChange
-                    if re.fullmatch(r'[a-z][a-zA-Z0-9]{4,}', value) and re.search(r'[A-Z]', value) and re.fullmatch(r'[a-zA-Z]+', value):
+                    # Skip values containing JS structural characters
+                    if any(c in value for c in "{}()[]<>"):
                         continue
 
-                elif dp.name in ("JSON Password Field", "JSON API Key/Token Field"):
-                    if shannon_entropy(value) < 3.2 or len(value) < 10:
+                elif dp.name == "JSON Password Field":
+                    if shannon_entropy(value) < 3.2 or len(value) < 8:
                         continue
-                    # Skip camelCase/snake_case identifiers used as enum/state values
-                    if re.fullmatch(r'[a-z][a-zA-Z0-9]{4,}', value) and re.fullmatch(r'[a-zA-Z]+', value):
+                    # Skip enum/state values: camelCase, snake_case, SCREAMING_SNAKE_CASE
+                    if _PASSWORD_FP_RE.match(value):
+                        continue
+                    if re.fullmatch(r'[a-z][a-zA-Z0-9]{4,}', value):
                         continue
                     if re.fullmatch(r'[a-z][a-z0-9_]{4,}', value) and '_' in value:
                         continue
+                    # Annotate with field name so finding shows "wsApiKeyPassword: uuid" not just "uuid"
+                    field_match = re.match(r'"([^"]+)"', match.group(0))
+                    if field_match:
+                        value = f'{field_match.group(1)}: {value}'
 
-                elif dp.name == "JSON Credential-Like Key":
-                    if shannon_entropy(value) < 3.8 or len(value) < 20:
+                elif dp.name == "JSON Credential Key ID":
+                    if len(value) < 4:
+                        continue
+                    # Skip very short generic words (likely placeholder/default)
+                    if re.fullmatch(r'[a-z]{2,8}', value):
+                        continue
+                    # Annotate with field name for display context
+                    field_match = re.match(r'"([^"]+)"', match.group(0))
+                    if field_match:
+                        value = f'{field_match.group(1)}: {value}'
+
+                elif dp.name == "JSON Web Token":
+                    # Skip very short JWTs — likely test/example tokens
+                    if len(value) < 100:
                         continue
 
-                elif dp.name == "Generic API Key":
-                    if shannon_entropy(value) < 3.5:
+                elif dp.name == "Internal Network URL":
+                    if _BLOCKCHAIN_CONTEXT_RE.search(context):
                         continue
 
-                elif dp.name == "Bearer Token":
-                    if shannon_entropy(value) < 3.5:
-                        continue
-                    if re.fullmatch(r'[a-zA-Z][a-zA-Z0-9_\-\.]{2,39}', value):
-                        continue
-
-                elif dp.name == "process.env Assignment":
-                    if shannon_entropy(value) < 3.5:
-                        continue
-
-                elif dp.name == "International Phone Number":
-                    # Require phone context keywords — filters out large integer constants
-                    # from crypto/hash libraries (2147483648 = 2^31, etc.)
-                    if not _PHONE_CONTEXT_RE.search(context):
-                        continue
-                    # Skip obvious powers-of-2 and short numeric constants
-                    try:
-                        num = int(value[1:])  # strip leading +
-                        if num > 0 and (num & (num - 1)) == 0:  # power of 2
-                            continue
-                    except ValueError:
-                        pass
-
-                elif dp.name == "Admin/Internal Path":
-                    if len(value) < 12:
-                        continue
-                    # Skip documentation paths — real admin paths don't have these slugs
-                    if _DOCS_PATH_RE.search(value):
-                        continue
-
-                elif dp.name == "Email Address":
-                    parts = value.split("@")
-                    if len(parts) == 2:
-                        local, domain_part = parts
-                        # Skip hex-looking local parts (Sentry DSN host fragments)
-                        if re.fullmatch(r'[0-9a-f]{20,}', local):
-                            continue
-                        # Skip random-looking short addresses (Rfe@Rm.Rs pattern)
-                        if len(local) <= 3 and len(domain_part) <= 5:
-                            continue
-                        # Skip single-char TLDs
-                        tld = domain_part.rsplit(".", 1)[-1] if "." in domain_part else ""
-                        if len(tld) == 1:
-                            continue
-
-                # localhost/127.0.0.1 — lower severity, ubiquitous in webpack bundles
-                elif dp.name == "Internal IP/Host" and (
-                    value.strip("/").lower() in ("localhost", "127.0.0.1", "0.0.0.0")
-                    or value.rstrip("/").lower() in ("http://localhost", "https://localhost",
-                                                      "http://127.0.0.1", "https://127.0.0.1")
-                ):
-                    confidence = min(confidence, 35)
-                    dp_severity = Severity.LOW
-
-                # SSN: require context keywords or cap to very low confidence
-                if dp.name == "Social Security Number":
-                    if not SSN_CONTEXT_KEYWORDS.search(context):
-                        confidence = min(confidence, 25)
+                # Skip template literals / interpolation — not real values
+                if re.search(r'[$#]\{|{{|\$\(', value):
+                    continue
 
                 if confidence < 20:
-                    continue  # skip near-zero confidence
+                    continue
 
-                # Deduplicate by value hash
                 value_hash = hashlib.sha256(value.encode()).hexdigest()[:16]
                 if value_hash in findings_by_id:
-                    # Update source if we already have this finding
                     continue
 
                 ln = line_number_for(match.start())
@@ -774,9 +598,7 @@ _PURE_HEX_RE = re.compile(r'^[0-9a-fA-F]+$')
 _PURE_ALPHANUM_RE = re.compile(r'^[a-zA-Z0-9]+$')
 _VERSION_RE = re.compile(r'^v?\d+\.\d+')
 _UUID_RE = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', re.IGNORECASE)
-
-# CSS hex color allowlist (3 or 6 hex chars)
-_CSS_HEX_RE = re.compile(r'^[0-9a-fA-F]{3}(?:[0-9a-fA-F]{3})?$')
+_BASE58_RE = re.compile(r'^[1-9A-HJ-NP-Za-km-z]{32,50}$')
 
 
 def detect_high_entropy(
@@ -788,9 +610,8 @@ def detect_high_entropy(
     min_len: int = 20,
     max_len: int = 100,
 ) -> list[Finding]:
-    """Find high-entropy strings that weren't caught by named patterns."""
+    """Find high-entropy strings with credential context keywords."""
     findings: list[Finding] = []
-    # Look for quoted strings of appropriate length
     string_re = re.compile(r'["\']([a-zA-Z0-9+/=_\-]{' + str(min_len) + r',' + str(max_len) + r'})["\']')
     seen: set[str] = set()
 
@@ -802,28 +623,19 @@ def detect_high_entropy(
 
         if is_placeholder(value):
             continue
-
-        # Skip pure hex strings (likely build hashes, git commits)
         if _PURE_HEX_RE.match(value):
             continue
-
-        # Skip SRI hashes (sha256-..., sha384-..., sha512-...) — public integrity hashes
         if _SRI_HASH_RE.match(value):
             continue
-
-        # Skip base58 strings — Solana/Bitcoin addresses, program IDs (not secrets)
         if _BASE58_RE.match(value):
             continue
-
-        # Skip version strings
+        # PostHog/analytics public keys — not secrets
+        if re.match(r'^phc_', value, re.IGNORECASE):
+            continue
         if _VERSION_RE.match(value):
             continue
-
-        # Skip UUIDs
         if _UUID_RE.match(value):
             continue
-
-        # Skip short pure-alphanumeric strings (likely minified variable names or build IDs)
         if _PURE_ALPHANUM_RE.match(value) and len(value) < 24:
             continue
 
@@ -832,12 +644,10 @@ def detect_high_entropy(
             continue
 
         context = get_context_window(text, match.start(), match.end(), window=100)
-
-        # Require context keyword — skip if surrounding 100 chars have no secret indicator
         if not _ENTROPY_CONTEXT_KEYWORDS.search(context):
             continue
 
-        confidence = min(85, int(ent * 10))  # scale confidence with entropy
+        confidence = min(85, int(ent * 10))
 
         finding = Finding(
             category=Category.API_KEY,
@@ -857,7 +667,6 @@ def detect_high_entropy(
 
 
 def deduplicate_findings(findings: list[Finding]) -> list[Finding]:
-    """Deduplicate findings by value hash, keeping highest confidence."""
     by_id: dict[str, Finding] = {}
     for f in findings:
         if f.id not in by_id or f.confidence > by_id[f.id].confidence:
@@ -872,11 +681,9 @@ def run_detection(
     framework: str = "",
     include_entropy: bool = True,
 ) -> list[Finding]:
-    """Run full detection pipeline on a chunk of text."""
     findings = detect_in_text(text, source_url, host, framework)
     if include_entropy:
         entropy_findings = detect_high_entropy(text, source_url, host, framework)
-        # Only add entropy findings for values not already caught
         existing_values = {f.id for f in findings}
         for f in entropy_findings:
             if f.id not in existing_values:

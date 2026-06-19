@@ -77,12 +77,8 @@ async def check_cors(
                         severity = Severity.MEDIUM
                         confidence = 80
                         detail = f"Origin reflected without credentials — still allows cross-origin reads"
-                    elif acao == "*":
-                        severity = Severity.LOW
-                        confidence = 70
-                        detail = "Wildcard CORS — acceptable for public APIs, review if endpoint has auth"
                     else:
-                        return
+                        return  # Wildcard without credentials is fine for public APIs — skip
 
                     findings.append(Finding(
                         category=Category.CORS,
