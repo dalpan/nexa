@@ -1,12 +1,7 @@
 <div align="center">
-
-```
-  _  _ _______  ___   
- | \| | ____\ \/ / \  
- | .` |  _|  >  < / _ 
- |_|\_|___| /_/\_/_/ \_   v1.5.1
-  Credential & Secret Scanner
-```
+  
+# NEXA
+<p>Credential & Secret Scanner</p>
 
 <a href="https://github.com/dalpan/nexa/releases/latest"><img src="https://img.shields.io/github/v/release/dalpan/nexa?color=58a6ff&label=version&style=flat-square" alt="version"/></a>
 <img src="https://img.shields.io/badge/python-3.11+-58a6ff?style=flat-square" alt="python"/>
