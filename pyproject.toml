@@ -1,0 +1,57 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "nexa"
+version = "1.3.1"
+description = "Frontend Exposure & Secret Detection — authorized security assessments."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+keywords = ["security", "bug-bounty", "frontend", "javascript", "secrets-detection"]
+authors = [
+    { name = "NEXA contributors" }
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Information Technology",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Security",
+]
+dependencies = [
+    "typer[all]>=0.9.0",
+    "httpx[http2]>=0.25.0",
+    "beautifulsoup4>=4.12.0",
+    "rich>=13.0.0",
+    "anyio>=4.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4.0",
+    "pytest-asyncio>=0.23.0",
+    "pytest-cov>=4.1.0",
+]
+
+[project.scripts]
+nexa = "nexa.cli:main"
+
+[project.urls]
+"Source" = "https://github.com/security-tools/nexa"
+"Bug Tracker" = "https://github.com/security-tools/nexa/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["nexa"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.coverage.run]
+source = ["nexa"]
+omit = ["tests/*"]

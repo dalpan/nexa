@@ -1,0 +1,70 @@
+<svg width="100%" viewBox="0 0 680 200" role="img" xmlns="http://www.w3.org/2000/svg">
+<title>NEXA — Frontend Exposure &amp; Secret Detection</title>
+<desc>NEXA security tool banner</desc>
+<style>
+  .bg { fill: #0d1117; }
+  .grid { stroke: #1e2a3a; }
+  .accent { fill: #58a6ff; }
+  .accent-stroke { stroke: #58a6ff; }
+  .title { fill: #e6edf3; }
+  .sub { fill: #8b949e; }
+  .dot { fill: #3fb950; }
+  .dot2 { fill: #f85149; }
+  .dot3 { fill: #d29922; }
+  .badge-bg { fill: #1e2a3a; }
+  .badge-text { fill: #58a6ff; }
+  .scan-line { stroke: #58a6ff; }
+</style>
+
+<rect class="bg" width="680" height="200" rx="12"/>
+
+<g class="grid" stroke-width="0.5" opacity="0.4">
+  <line x1="0" y1="40" x2="680" y2="40"/>
+  <line x1="0" y1="80" x2="680" y2="80"/>
+  <line x1="0" y1="120" x2="680" y2="120"/>
+  <line x1="0" y1="160" x2="680" y2="160"/>
+  <line x1="80" y1="0" x2="80" y2="200"/>
+  <line x1="160" y1="0" x2="160" y2="200"/>
+  <line x1="240" y1="0" x2="240" y2="200"/>
+  <line x1="320" y1="0" x2="320" y2="200"/>
+  <line x1="400" y1="0" x2="400" y2="200"/>
+  <line x1="480" y1="0" x2="480" y2="200"/>
+  <line x1="560" y1="0" x2="560" y2="200"/>
+  <line x1="640" y1="0" x2="640" y2="200"/>
+</g>
+
+<line class="scan-line" x1="40" y1="100" x2="640" y2="100" stroke-width="1" opacity="0.15" stroke-dasharray="4 6"/>
+
+<path d="M 48 60 L 40 60 L 40 140 L 48 140" fill="none" class="accent-stroke" stroke-width="2" stroke-linecap="round"/>
+<path d="M 632 60 L 640 60 L 640 140 L 632 140" fill="none" class="accent-stroke" stroke-width="2" stroke-linecap="round"/>
+
+<circle cx="40" cy="60" r="3" class="dot"/>
+<circle cx="40" cy="140" r="3" class="dot"/>
+<circle cx="640" cy="60" r="3" class="dot"/>
+<circle cx="640" cy="140" r="3" class="dot2"/>
+
+<text x="340" y="108" text-anchor="middle" class="title"
+  font-family="monospace" font-size="72" font-weight="700" letter-spacing="12">NEXA</text>
+
+<line x1="220" y1="118" x2="460" y2="118" class="accent-stroke" stroke-width="2"/>
+
+<text x="340" y="144" text-anchor="middle" class="sub"
+  font-family="monospace" font-size="13" letter-spacing="3">FRONTEND EXPOSURE &amp; SECRET DETECTION</text>
+
+<rect x="292" y="155" width="96" height="22" rx="4" class="badge-bg"/>
+<text x="340" y="170" text-anchor="middle" class="badge-text"
+  font-family="monospace" font-size="11" font-weight="500">v1.2.0 · python</text>
+
+<circle cx="590" cy="46" r="2.5" class="dot3" opacity="0.7"/>
+<circle cx="602" cy="46" r="2.5" class="dot" opacity="0.7"/>
+<circle cx="614" cy="46" r="2.5" class="dot2" opacity="0.7"/>
+
+<rect x="56" y="94" width="8" height="12" rx="1" class="accent" opacity="0.6"/>
+<rect x="72" y="97" width="8" height="6" rx="1" class="accent" opacity="0.3"/>
+<rect x="88" y="92" width="8" height="16" rx="1" class="accent" opacity="0.5"/>
+<rect x="104" y="96" width="8" height="8" rx="1" class="accent" opacity="0.2"/>
+
+<rect x="600" y="94" width="8" height="12" rx="1" class="dot2" opacity="0.6"/>
+<rect x="616" y="97" width="8" height="6" rx="1" class="dot2" opacity="0.4"/>
+<rect x="584" y="96" width="8" height="8" rx="1" class="dot3" opacity="0.5"/>
+</svg>
