@@ -112,7 +112,7 @@ async def _run_scan(
     from nexa.core.detectors import deduplicate_findings, run_detection
     from nexa.core.validators import validate_findings
     from nexa.core.waf_bypass import WAFBypassConfig
-    from nexa.core.headers import check_security_headers
+    # check_security_headers intentionally not imported — not relevant to this tool
     from nexa.core.probe import probe_sensitive_files
     from nexa.core.cors import check_cors
     from nexa.models import Category, Finding, Severity, ScanResult
@@ -177,14 +177,8 @@ async def _run_scan(
         if fw_result.detected:
             console.print(f"  Detected: [cyan]{', '.join(fw_result.detected)}[/cyan]")
 
-        # 3. Security headers check (from already-crawled pages — zero extra requests)
-        console.print("[bold cyan]»[/bold cyan] Checking security headers...")
-        seen_header_hosts: set[str] = set()
-        for cr in crawl_results:
-            cr_host = urlparse(cr.url).hostname or domain
-            if cr.headers and cr_host not in seen_header_hosts:
-                seen_header_hosts.add(cr_host)
-                result.findings.extend(check_security_headers(cr.url, cr_host, cr.headers))
+        # 3. Security headers — intentionally skipped.
+        # Missing headers are not bug bounty findings; they're config hardening issues.
 
         # 4. Subdomain discovery
         if not no_subdomain:
@@ -206,10 +200,6 @@ async def _run_scan(
                             crawl_results.extend(sub_cr)
                             result.hosts.append(sub)
                             all_html += "\n".join(r.raw_html for r in sub_cr)
-                            # Check security headers on subdomain too
-                            result.findings.extend(
-                                check_security_headers(sub_cr[0].url, sub, sub_cr[0].headers)
-                            )
                             break
                 console.print(f"  Total pages crawled: {len(crawl_results)}")
 
@@ -241,7 +231,19 @@ async def _run_scan(
             result.source_maps = source_maps
             if source_maps:
                 console.print(f"  Found {len(source_maps)} source maps")
+                _CDN_RE = _re.compile(
+                    r'cdn\.|jsdelivr\.net|cdnjs\.cloudflare\.com|unpkg\.com'
+                    r'|bootstrapcdn|ajax\.googleapis|raw\.githubusercontent',
+                    _re.IGNORECASE,
+                )
                 for sm in source_maps:
+                    sm_host = sm.url.split("/")[2] if "//" in sm.url else ""
+                    # Skip CDN source maps — public open-source libraries, not bugs
+                    if _CDN_RE.search(sm_host):
+                        continue
+                    # Skip testnet/dev/staging — expected to have source maps
+                    if _re.search(r'\b(testnet|staging|dev|preview|sandbox|demo|test|beta|alpha|local)\b', sm_host, _re.IGNORECASE):
+                        continue
                     result.findings.append(Finding(
                         category=Category.SOURCE_MAP,
                         severity=Severity.MEDIUM,
@@ -257,27 +259,69 @@ async def _run_scan(
         # 7. Run detectors
         console.print("[bold cyan]»[/bold cyan] Running secret detectors...")
         framework_str = ", ".join(fw_result.detected)
-        _NEXT_DATA_RE = _re.compile(
-            r'<script[^>]*id=["\']__NEXT_DATA__["\'][^>]*>(.*?)</script>',
-            _re.DOTALL | _re.IGNORECASE,
-        )
 
-        for cr in crawl_results:
-            result.findings.extend(run_detection(cr.raw_html, cr.url, domain, framework_str))
-            for m in _NEXT_DATA_RE.finditer(cr.raw_html):
-                result.findings.extend(run_detection(m.group(1), cr.url, domain, framework_str))
-            for script in cr.inline_scripts:
-                result.findings.extend(run_detection(script, cr.url, domain, framework_str))
-            for comment in cr.html_comments:
-                result.findings.extend(run_detection(comment, cr.url, domain, framework_str))
+        # Regex patterns to extract embedded JSON state from all major JS frameworks.
+        # These payloads often contain backend credentials hardcoded by the server (Kraken finding class).
+        _FRAMEWORK_STATE_PATTERNS = [
+            # Next.js — server-side rendered props
+            _re.compile(r'<script[^>]*id=["\']__NEXT_DATA__["\'][^>]*>(.*?)</script>', _re.DOTALL | _re.IGNORECASE),
+            # Nuxt.js — window.__NUXT__ or __NUXT_DATA__
+            _re.compile(r'window\.__NUXT__\s*=\s*(\{.*?\})\s*;', _re.DOTALL),
+            _re.compile(r'<script[^>]*id=["\']__NUXT_DATA__["\'][^>]*>(.*?)</script>', _re.DOTALL | _re.IGNORECASE),
+            # Remix
+            _re.compile(r'window\.__remixContext\s*=\s*(\{.*?\})\s*;', _re.DOTALL),
+            # Gatsby
+            _re.compile(r'window\.pageData\s*=\s*(\{.*?\})\s*;', _re.DOTALL),
+            _re.compile(r'window\.__GATSBY\w*\s*=\s*(\{.*?\})\s*;', _re.DOTALL),
+            # SvelteKit — data embedded in script tag
+            _re.compile(r'<script[^>]*id=["\']svelte-data["\'][^>]*>(.*?)</script>', _re.DOTALL | _re.IGNORECASE),
+            # Astro — inline data island
+            _re.compile(r'<script[^>]*type=["\']application/json["\'][^>]*>(.*?)</script>', _re.DOTALL | _re.IGNORECASE),
+            # Generic: any script tag with type=application/json (used by many frameworks)
+            _re.compile(r'<script[^>]*type=["\']application/ld\+json["\'][^>]*>(.*?)</script>', _re.DOTALL | _re.IGNORECASE),
+            # Angular universal transfer state
+            _re.compile(r'<script[^>]*id=["\']ng-state["\'][^>]*>(.*?)</script>', _re.DOTALL | _re.IGNORECASE),
+            # Vue SSR — window.__VUE_SSR_CONTEXT__ or __INITIAL_STATE__
+            _re.compile(r'window\.__(?:VUE_SSR_CONTEXT|INITIAL_STATE|APP_INITIAL_STATE)__\s*=\s*(\{.*?\})\s*;', _re.DOTALL),
+            # Generic INITIAL_STATE / INITIAL_DATA patterns used by many apps
+            _re.compile(r'window\.__(?:INITIAL_STATE|INITIAL_DATA|STORE_STATE|REDUX_STATE|APP_STATE|SERVER_DATA)__\s*=\s*(\{.*?\})\s*;', _re.DOTALL),
+        ]
 
-        for js_file in js_files:
-            result.findings.extend(run_detection(js_file.content, js_file.url, domain, framework_str))
+        from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, MofNCompleteColumn
 
-        for sm in result.source_maps:
-            for src_content in sm.sources_content:
-                if src_content:
-                    result.findings.extend(run_detection(src_content, sm.url, domain, framework_str))
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[cyan]{task.description}[/cyan]"),
+            BarColumn(bar_width=25),
+            MofNCompleteColumn(),
+            console=console,
+            transient=True,
+        ) as prog:
+            html_task = prog.add_task("HTML pages", total=len(crawl_results))
+            for cr in crawl_results:
+                result.findings.extend(run_detection(cr.raw_html, cr.url, domain, framework_str))
+                for state_re in _FRAMEWORK_STATE_PATTERNS:
+                    for m in state_re.finditer(cr.raw_html):
+                        payload = m.group(1).strip()
+                        if len(payload) > 10:
+                            result.findings.extend(run_detection(payload, cr.url, domain, framework_str))
+                for script in cr.inline_scripts:
+                    result.findings.extend(run_detection(script, cr.url, domain, framework_str))
+                for comment in cr.html_comments:
+                    result.findings.extend(run_detection(comment, cr.url, domain, framework_str))
+                prog.advance(html_task)
+
+            js_task = prog.add_task("JS files", total=max(len(js_files), 1))
+            for js_file in js_files:
+                result.findings.extend(run_detection(js_file.content, js_file.url, domain, framework_str))
+                prog.advance(js_task)
+
+            sm_task = prog.add_task("Source maps", total=max(len(result.source_maps), 1))
+            for sm in result.source_maps:
+                for src_content in sm.sources_content:
+                    if src_content:
+                        result.findings.extend(run_detection(src_content, sm.url, domain, framework_str))
+                prog.advance(sm_task)
 
         # 8. Extractors
         all_js_content = "\n".join(jf.content for jf in js_files)

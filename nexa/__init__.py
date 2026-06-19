@@ -1,5 +1,5 @@
 """nexa — Frontend Asset Discovery & Sensitive Data Exposure Detection."""
 
-__version__ = "1.3.1"
+__version__ = "1.5.1"
 __author__ = "nexa contributors"
 __description__ = "Frontend asset discovery and sensitive data exposure detection for authorized security assessments."
