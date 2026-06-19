@@ -13,18 +13,24 @@ from nexa.core.waf_bypass import WAFBypassConfig, apply_jitter, build_bypass_hea
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_UA = "nexa/1.0 (+https://github.com/security-tools/nexa)"
-DEFAULT_TIMEOUT = 15.0
+DEFAULT_UA = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/125.0.0.0 Safari/537.36"
+)
+DEFAULT_TIMEOUT = 20.0
 DEFAULT_RETRIES = 3
 DEFAULT_RATE_LIMIT = 5.0  # req/s
 
 DEFAULT_HEADERS = {
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
     # Do NOT set Accept-Encoding manually — httpx manages decompression internally.
-    # Manually claiming brotli support without the brotli library installed causes
-    # servers to send compressed content that arrives as undecodable binary.
     "Accept-Language": "en-US,en;q=0.9",
     "Cache-Control": "no-cache",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Upgrade-Insecure-Requests": "1",
 }
 
 FetchResult = tuple[str, int, dict[str, str], str]  # content, status, headers, final_url
@@ -137,19 +143,31 @@ class HttpClient:
 
                 return content, resp.status_code, headers, final_url
 
-            except httpx.TimeoutException as e:
-                last_exc = e
-                logger.debug("Timeout on %s (attempt %d/%d)", url, attempt + 1, self._retries)
-                if attempt < self._retries - 1:
-                    await asyncio.sleep(2 ** attempt)
-
-            except httpx.TooManyRedirects as e:
+            except httpx.TooManyRedirects:
                 logger.debug("Too many redirects for %s", url)
                 return "", 0, {}, url
 
+            except httpx.RemoteProtocolError as e:
+                # HTTP/2 protocol errors — retry with HTTP/1.1
+                logger.debug("HTTP/2 protocol error for %s, retrying with HTTP/1.1: %s", url, e)
+                try:
+                    tmp_client = httpx.AsyncClient(
+                        headers={**DEFAULT_HEADERS, "User-Agent": self._user_agent},
+                        timeout=httpx.Timeout(self._timeout),
+                        follow_redirects=True,
+                        verify=self._verify_ssl,
+                        http2=False,
+                    )
+                    async with tmp_client:
+                        resp = await tmp_client.get(url, **kwargs)
+                        return resp.text, resp.status_code, dict(resp.headers), str(resp.url)
+                except Exception as inner:
+                    last_exc = inner
+                    if attempt < self._retries - 1:
+                        await asyncio.sleep(2 ** attempt)
+
             except httpx.ConnectError as e:
                 err_str = str(e).lower()
-                # SSL errors surface as ConnectError in modern httpx — retry without verify
                 if "ssl" in err_str or "certificate" in err_str or "tls" in err_str:
                     logger.debug("SSL/TLS error for %s, retrying without verification: %s", url, e)
                     try:
@@ -162,15 +180,18 @@ class HttpClient:
                         )
                         async with tmp_client:
                             resp = await tmp_client.get(url, **kwargs)
-                            headers = dict(resp.headers)
-                            final_url = str(resp.url)
-                            content = resp.text
-                            return content, resp.status_code, headers, final_url
+                            return resp.text, resp.status_code, dict(resp.headers), str(resp.url)
                     except Exception as inner:
                         last_exc = inner
                         return "", 0, {}, url
                 logger.debug("Connection error for %s: %s", url, e)
                 return "", 0, {}, url
+
+            except (httpx.ReadTimeout, httpx.PoolTimeout) as e:
+                last_exc = e
+                logger.debug("Timeout on %s (attempt %d/%d)", url, attempt + 1, self._retries)
+                if attempt < self._retries - 1:
+                    await asyncio.sleep(2 ** attempt)
 
             except httpx.RequestError as e:
                 last_exc = e

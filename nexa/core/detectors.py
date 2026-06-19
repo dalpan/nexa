@@ -538,36 +538,60 @@ def detect_in_text(
                         dp_severity = Severity.INFO
 
                 # Skip values containing JS structural characters — artifacts of minified object matching
-                # e.g. "+a.pass),{" or "},changePasswordButton:" are JS fragments, not credentials
                 if any(c in value for c in "{}()[]") and dp.category == Category.CREDENTIAL:
                     continue
 
-                # Authorization Header: skip algorithm names (STRIPE-V2-SIG), URL paths, bare identifiers
-                elif dp.name == "Hardcoded Authorization Header":
-                    # Skip all-caps identifier (signature scheme names, e.g. STRIPE-V2-SIG, HMAC-SHA256)
+                # Skip template literal / interpolation patterns — value is a variable ref, not a real secret
+                if re.search(r'[$#]\{|{{|\$\(', value):
+                    continue
+
+                # Authorization Header: skip algorithm names, URL paths, bare identifiers
+                if dp.name == "Hardcoded Authorization Header":
                     if re.fullmatch(r'[A-Z][A-Z0-9_\-]{2,30}', value):
                         continue
-                    # Skip URL paths (API route templates like /authorizations/:id)
                     if value.startswith("/"):
                         continue
-                    # Skip low-entropy snake_case/kebab-case identifiers (service names)
-                    if re.fullmatch(r'[a-z][a-z0-9_\-]{2,29}', value) and shannon_entropy(value) < 3.5:
+                    if re.fullmatch(r'[a-zA-Z][a-zA-Z0-9_\-]{2,39}', value) and shannon_entropy(value) < 3.5:
                         continue
 
-                # For general credential/password/secret patterns: skip low-entropy identifiers
                 elif dp.name in ("Hardcoded Password", "Hardcoded Secret"):
-                    # Snake_case / kebab-case service name (iam_control_plane, my-service-name)
-                    if re.fullmatch(r'[a-z][a-z0-9_\-]{2,49}', value) and shannon_entropy(value) < 3.5:
+                    if re.fullmatch(r'[a-zA-Z][a-zA-Z0-9_\-]{2,49}', value) and shannon_entropy(value) < 3.5:
                         continue
 
-                # Assigned Password/Secret Variable: skip UI component names and natural language
                 elif dp.name == "Assigned Password/Secret Variable":
-                    # PascalCase / brand-prefixed identifier — likely a React component or product name
-                    # Matches: PasswordInput, TwoFactorSetupPassword, 1Password, 2FA
                     if re.fullmatch(r'[0-9]?[A-Z][a-zA-Z0-9]{2,}', value) and re.fullmatch(r'[a-zA-Z0-9]+', value):
                         continue
-                    # Natural language phrase (only letters, spaces, commas, periods, apostrophes)
                     if re.fullmatch(r"[A-Za-z ,.']{6,}", value):
+                        continue
+                    if shannon_entropy(value) < 3.5:
+                        continue
+
+                elif dp.name == "JSON Credential-Like Key":
+                    if shannon_entropy(value) < 3.8 or len(value) < 20:
+                        continue
+
+                elif dp.name == "Generic API Key":
+                    if shannon_entropy(value) < 3.5:
+                        continue
+
+                elif dp.name == "Bearer Token":
+                    if shannon_entropy(value) < 3.5:
+                        continue
+                    # Skip if it looks like a variable name or path (no high-entropy chars)
+                    if re.fullmatch(r'[a-zA-Z][a-zA-Z0-9_\-\.]{2,39}', value):
+                        continue
+
+                elif dp.name in ("JSON Password Field", "JSON API Key/Token Field"):
+                    if shannon_entropy(value) < 3.2 or len(value) < 10:
+                        continue
+
+                elif dp.name == "process.env Assignment":
+                    if shannon_entropy(value) < 3.5:
+                        continue
+
+                elif dp.name == "Admin/Internal Path":
+                    # Only flag if the path has more specificity beyond just the keyword
+                    if len(value) < 12:
                         continue
 
                 # localhost/127.0.0.1 are ubiquitous in webpack/jest/dev bundles — lower noise

@@ -137,6 +137,13 @@ def _detect_block(url: str, final_url: str, status: int, headers: dict[str, str]
 async def crawl_page(client: HttpClient, url: str) -> Optional[CrawlResult]:
     """Fetch and parse a single page."""
     content, status, headers, final_url = await client.get(url)
+
+    # If HTTPS fails completely, try HTTP fallback
+    if (not content or status == 0) and url.startswith("https://"):
+        http_url = "http://" + url[8:]
+        logger.debug("HTTPS failed for %s, trying HTTP fallback", url)
+        content, status, headers, final_url = await client.get(http_url)
+
     if not content or status == 0:
         logger.debug("No content for %s (status=%d)", url, status)
         return None
