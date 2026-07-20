@@ -30,7 +30,7 @@ Built for bug bounty hunters and pentesters. Works standalone or chained with `s
 
 ## Features
 
-- **Credential pair detection** — captures both username/keyId and password/secret fields together (e.g. `wsApiKeyId: cfbenchmarksws` + `wsApiKeyPassword: uuid`)
+- **Credential pair detection** — captures both username/keyId and password/secret fields together (e.g. `wsApiKeyId: xxxxxxx` + `wsApiKeyPassword: uuid`)
 - **All major JS frameworks** — extracts and scans `__NEXT_DATA__`, `__NUXT__`, `__remixContext`, `__GATSBY__`, `ng-state`, `__INITIAL_STATE__`, SvelteKit, Astro, and generic `application/json` script tags
 - **26 targeted patterns** — AWS, Google, GitHub, Stripe, Slack, SendGrid, Twilio, Sentry, JWT, Basic Auth, hardcoded passwords, and more
 - **High-entropy string detection** — catches unknown secrets via Shannon entropy scoring with credential keyword context
